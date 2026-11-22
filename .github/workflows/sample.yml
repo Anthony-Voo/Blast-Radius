@@ -26,8 +26,7 @@ jobs:
             last=$(tail -1 stderr.txt)
             echo "::notice title=run $i::wall=$(echo "$end - $start" | bc)s | $score | $last"
             if [ "$i" = "1" ]; then
-              detail=$(grep -E " (hot|fresh) ran | warm worker|eligible|crashed|FATAL|emit " stderr.txt | sed -E 's/ wall=[0-9.]+s//; s/ complete=(True|False)//; s/ broken=\[\]//; s/ \[.*$//' | cut -c1-95 | tr '
-' ';' | cut -c1-3800)
+              detail=$(grep -E " (hot|fresh) ran | warm worker|eligible|crashed|FATAL|emit " stderr.txt | sed -E 's/ wall=[0-9.]+s//; s/ complete=(True|False)//; s/ broken=\[\]//; s/ \[.*$//' | cut -c1-95 | tr '\n' ';' | cut -c1-3800)
               echo "::notice title=detail::$detail"
             fi
             docker rm run$i > /dev/null
