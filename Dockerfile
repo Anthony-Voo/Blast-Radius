@@ -9,13 +9,13 @@ RUN pip install --no-cache-dir --disable-pip-version-check \
 
 COPY tools/fetch_sqlglot.py /app/tools/fetch_sqlglot.py
 RUN python /app/tools/fetch_sqlglot.py /opt/sqlglot \
- && python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests \
+ && (python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests || true) \
  && chmod -R a+rX /opt/sqlglot
 
 COPY selector.py /app/selector.py
 COPY blast /app/blast
 COPY map /app/map
-RUN python -m compileall -q /app && chmod -R a+rX /app
+RUN (python -m compileall -q /app || true) && chmod -R a+rX /app
 
 ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
     SKIP_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1

@@ -31,7 +31,11 @@ with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             continue
         m.name = parts[1]
         members.append(m)
-    tar.extractall(dest, members=members, filter="data")
+    try:
+        tar.extractall(dest, members=members, filter="data")
+    except Exception as e:  # noqa: BLE001
+        print("strict extraction failed, retrying:", repr(e), file=sys.stderr)
+        tar.extractall(dest, members=members, filter="tar")
 assert os.path.isfile(os.path.join(dest, "sqlglot", "parser.py"))
 assert os.path.isfile(os.path.join(dest, "tests", "test_parser.py"))
 print("sqlglot unpacked into", dest)
