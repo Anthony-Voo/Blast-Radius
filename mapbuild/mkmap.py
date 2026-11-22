@@ -6,8 +6,24 @@ ids = [t["id"] for t in tests]
 idx = {t: i for i, t in enumerate(ids)}
 lines, files, classes, implines, classimports = {}, {}, {}, {}, {}
 srcs = [os.path.join(cov, "map.json")] + sorted(glob.glob(os.path.join(cov, "map.json.child.*.json")))
+class_ctx = 0
 for p in srcs:
     d = json.load(open(p))
+    # class-level set-up contexts apply to every test of that class
+    for part in ("lines", "files", "classes"):
+        for ctx in [k for k in d[part] if k.startswith("<class:")]:
+            prefix = ctx[len("<class:"):-1] + "::"
+            members = [t for t in ids if t.startswith(prefix)]
+            class_ctx += 1
+            for t in members:
+                cur = d[part].get(t)
+                val = d[part][ctx]
+                if part == "lines":
+                    cur = d[part].setdefault(t, {})
+                    for f, ls in val.items():
+                        cur[f] = sorted(set(cur.get(f, ())) | set(ls))
+                else:
+                    d[part][t] = sorted(set(cur or ()) | set(val))
     for t, fm in d["lines"].items():
         i = idx.get(t)
         if i is None: continue
@@ -90,6 +106,7 @@ meta = {"tests": ids, "cost": cost, "isolated": sorted(isolated),
 with gzip.open(os.path.join(outdir, "meta.json.gz"), "wt", compresslevel=9) as g:
     json.dump(meta, g, separators=(",", ":"))
 total += os.path.getsize(os.path.join(outdir, "meta.json.gz"))
+print("class set-up contexts merged", class_ctx)
 print("files with lines", len(lines), "opened", len(files), "classes", len(classes), "bytes", total)
 nocov = [t for t in ids if not any(idx[t] in s for fl in lines.values() for s in fl.values())]
 print("tests with no line coverage:", nocov)

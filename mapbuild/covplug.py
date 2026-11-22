@@ -28,6 +28,38 @@ def pytest_configure(config):
     ProcessPoolExecutor.submit = submit
 
 
+_wrapped_classes = set()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pycollect_makeitem(collector, name, obj):
+    """Give class-level set-up its own context, so what setUpClass loads or
+    executes is credited to every test of the class, not just the first."""
+    try:
+        if isinstance(obj, type) and "setUpClass" in obj.__dict__ and obj not in _wrapped_classes:
+            _wrapped_classes.add(obj)
+            path = os.path.relpath(str(collector.path), covcore.ROOT).replace(os.sep, "/")
+            key = f"<class:{path}::{obj.__name__}>"
+            orig = obj.__dict__["setUpClass"].__func__
+
+            def setUpClass(klass, _orig=orig, _key=key):
+                prev = covcore.current
+                covcore.set_current(_key)
+                with covcore._orig_open(covcore.OUT + ".cur", "w") as f:
+                    f.write(_key)
+                try:
+                    return _orig(klass)
+                finally:
+                    covcore.set_current(prev)
+                    with covcore._orig_open(covcore.OUT + ".cur", "w") as f:
+                        f.write(prev)
+
+            obj.setUpClass = classmethod(setUpClass)
+    except Exception as e:  # pragma: no cover
+        print("setUpClass wrap failed", repr(e))
+    return None
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
     with covcore._orig_open(covcore.OUT + ".cur", "w") as f:

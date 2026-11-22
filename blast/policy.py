@@ -38,7 +38,8 @@ P = {
     "margin": _f("BLAST_MARGIN", "0.3"),
     "giant_est": _f("BLAST_GIANT", "7.0"),  # tests dearer than this to run are "slow"
     "wide_cands": _f("BLAST_WIDE_CANDS", "300"),  # candidate sets this large ...
-    "wide_frac": _f("BLAST_WIDE_FRAC", "0.4"),  # ... with this share of run tests failing mean "everything is broken"
+    "wide_frac": _f("BLAST_WIDE_FRAC", "0.4"),
+    "wide_probe": _f("BLAST_WIDE_PROBE", "30"),  # cheap tests spot-checked when a large set is emitted unverified  # ... with this share of run tests failing mean "everything is broken"
     "clean_rule": _f("BLAST_CLEAN_RULE", "3"),  # with clean evidence clear: 0 path-covered tests; 1 those and slow ones; 2 all; 3 slow ones only
     "nonslow_full": _f("BLAST_NONSLOW_FULL", "8.0"),  # run every non-slow candidate when that costs no more than this
     "min_evidence": _f("BLAST_MIN_EVIDENCE", "10"),  # fewer run tests than this is not evidence about the rest
@@ -71,7 +72,7 @@ def cost(nums, ms):
 
 
 class Plan:
-    __slots__ = ("mode", "prefix", "rest", "run_est", "emit_cost", "exp_cost", "focused", "sig", "cands")
+    __slots__ = ("mode", "prefix", "rest", "run_est", "emit_cost", "exp_cost", "focused", "sig", "cands", "keep_all")
 
     def __init__(self):
         self.mode = "emit"
@@ -83,6 +84,7 @@ class Plan:
         self.focused = set()
         self.sig = {}
         self.cands = set()
+        self.keep_all = False  # the run only checks for widespread breakage; nothing unrun is dropped
 
 
 def make_plan(cands, ms, est, focused=(), sig=None, data_only=False, broken=False, extra_overhead=0.0,
@@ -156,6 +158,16 @@ def make_plan(cands, ms, est, focused=(), sig=None, data_only=False, broken=Fals
     plan.exp_cost = plan.run_est + pf * fail_cost + (1 - pf) * clean_cost
     if broken or plan.exp_cost + p["margin"] < plan.emit_cost:
         plan.mode = "run"
+    elif len(cands) >= p["wide_cands"]:
+        # Not worth verifying, but a change this widely covered may break everything,
+        # including tests outside the candidates: spot-check a few cheap tests.
+        probe = [n for n in order if est(n) <= 0.5][: int(p["wide_probe"])]
+        if len(probe) >= 10:
+            plan.mode = "run"
+            plan.keep_all = True
+            plan.prefix = probe
+            plan.rest = cands - set(probe)
+            plan.run_est = sum(est(n) for n in probe) + (p["overhead"] if overhead is None else overhead) + extra_overhead
     return plan
 
 
@@ -181,6 +193,8 @@ def finalize(plan, results, est, p=P):
         # Widespread breakage also takes down tests that never touch the changed
         # code (shared caches, modules that no longer import): select everything.
         return None
+    if plan.keep_all:
+        return plan.cands - {n for n in ran if results[n] == "P"}
     for n in plan.cands:
         if n in results:
             continue
@@ -213,7 +227,7 @@ def should_stop(plan, results, ms, est, p=P):
     if not left:
         return False
     failed = [n for n in plan.prefix if results.get(n) == "F"]
-    if not failed:
+    if not failed or plan.keep_all:
         return False
     if len(plan.cands) >= p["wide_cands"] and len(failed) < 3 and len(results) < 25:
         return False  # too early to tell isolated failures from widespread breakage

@@ -144,11 +144,15 @@ def main():
                     for r, t in res.changed.items())
         )
 
+    def probe_file(r, t, res):
+        # sqlglot/__main__.py is the command line entry point; no test imports it
+        return t is not None and r in res.hot_lines and r.startswith("sqlglot/") and not r.endswith("__main__.py")
+
     def needs_probe(res):
         """Import-time code of a sqlglot module changed: it may no longer import."""
         return (
             res.cold and not res.broken
-            and any(t is not None and r in res.hot_lines and r.startswith("sqlglot/") for r, t in res.changed.items())
+            and any(probe_file(r, t, res) for r, t in res.changed.items())
         )
 
     live = [res for _, res in plans if res is not None and not res.static_all]
@@ -161,7 +165,7 @@ def main():
         """True when a patched module fails to import (then every test is exposed)."""
         if not needs_probe(res):
             return False
-        files = {r: t for r, t in res.changed.items() if t is not None and r in res.hot_lines and r.startswith("sqlglot/")}
+        files = {r: t for r, t in res.changed.items() if probe_file(r, t, res)}
         verdict = worker.probe(files) if worker is not None else None
         if verdict is None and runner.HAS_FORK:
             # no warm worker: import the patched modules in a fresh fork instead

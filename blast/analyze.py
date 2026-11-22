@@ -16,7 +16,7 @@ import textwrap
 from . import patchlib
 
 CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
-ROOT_CONFIG = {"pyproject.toml", "setup.cfg", "pytest.ini", "tox.ini", "conftest.py", "setup.py"}
+ROOT_CONFIG = {"pyproject.toml", "setup.cfg", "pytest.ini", "tox.ini", "conftest.py"}
 
 
 class Map:
@@ -362,8 +362,14 @@ class Analyzer:
         for rel in paths:
             base = rel.rsplit("/", 1)[-1]
             if base in ROOT_CONFIG and (rel.count("/") == 0 or base == "conftest.py"):
-                res.static_all = True
-                res.notes.append(f"config file {rel}")
+                # Test-runner configuration: cannot be verified by running tests here.
+                # Lines that are blank or comments in these formats change nothing.
+                touched = [t for _, _, _, _, body in fp.hunks for tag, t, _ in body if tag != " "]
+                if base == "conftest.py" or fp.is_new or fp.new is None or any(
+                    t.strip() and not t.strip().startswith(("#", ";")) for t in touched
+                ):
+                    res.static_all = True
+                    res.notes.append(f"config file {rel}")
         old_text = self.read(old_rel) if old_rel else None
         if old_rel and old_text is None and not fp.is_new:
             # patch touches a file that does not exist at the pinned commit
