@@ -39,7 +39,8 @@ P = {
     "giant_est": _f("BLAST_GIANT", "7.0"),  # tests dearer than this to run are "slow"
     "wide_cands": _f("BLAST_WIDE_CANDS", "300"),  # candidate sets this large ...
     "wide_frac": _f("BLAST_WIDE_FRAC", "0.4"),  # ... with this share of run tests failing mean "everything is broken"
-    "clean_rule": _f("BLAST_CLEAN_RULE", "1"),  # 0: clear only path-covered tests; 1: also slow tests; 2: all
+    "clean_rule": _f("BLAST_CLEAN_RULE", "3"),  # with clean evidence clear: 0 path-covered tests; 1 those and slow ones; 2 all; 3 slow ones only
+    "nonslow_full": _f("BLAST_NONSLOW_FULL", "8.0"),  # run every non-slow candidate when that costs no more than this
     "min_evidence": _f("BLAST_MIN_EVIDENCE", "10"),  # fewer run tests than this is not evidence about the rest
 }
 
@@ -84,7 +85,8 @@ class Plan:
         self.cands = set()
 
 
-def make_plan(cands, ms, est, focused=(), sig=None, data_only=False, broken=False, extra_overhead=0.0, p=P):
+def make_plan(cands, ms, est, focused=(), sig=None, data_only=False, broken=False, extra_overhead=0.0,
+              overhead=None, p=P):
     """Decide between emitting every candidate and running a chosen prefix."""
     plan = Plan()
     cands = set(cands)
@@ -96,9 +98,14 @@ def make_plan(cands, ms, est, focused=(), sig=None, data_only=False, broken=Fals
     total = sum(est(n) for n in order)
     chosen = []
     cum = 0.0
+    nonslow = [n for n in order if est(n) <= p["giant_est"]]
+    nonslow_total = sum(est(n) for n in nonslow)
     if total <= p["full"]:
         chosen = list(order)
         cum = total
+    elif nonslow and nonslow_total <= p["nonslow_full"]:
+        chosen = nonslow
+        cum = nonslow_total
     else:
         taken = set()
         if plan.focused:
@@ -136,7 +143,7 @@ def make_plan(cands, ms, est, focused=(), sig=None, data_only=False, broken=Fals
             cum += e
     plan.prefix = chosen
     plan.rest = cands - set(chosen)
-    plan.run_est = cum + p["overhead"] + extra_overhead
+    plan.run_est = cum + (p["overhead"] if overhead is None else overhead) + extra_overhead
     if not chosen:
         return plan
     pf = p["p_fail_data"] if data_only else p["p_fail"]
@@ -185,7 +192,9 @@ def finalize(plan, results, est, p=P):
             # Nothing failed: clear a test once passing tests executed every
             # line it executes in the changed function.
             covered = sig[n] <= passed_union
-            if p["clean_rule"] >= 2:
+            if p["clean_rule"] >= 3:
+                ok = strong and est(n) > p["giant_est"]
+            elif p["clean_rule"] >= 2:
                 ok = strong
             elif p["clean_rule"] >= 1:
                 ok = strong and (covered or est(n) > p["giant_est"])

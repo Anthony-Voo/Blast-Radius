@@ -22,6 +22,7 @@ data_lines: dict = {}
 data_files: dict = {}
 data_classes: dict = {}
 data_imports: dict = {}  # file -> line -> set of modules whose import executed it
+data_class_imports: dict = {}  # class -> modules whose import instantiated it
 import_stack: list = []
 _seen_types: set = set()
 _norm_cache: dict = {}
@@ -91,6 +92,7 @@ def _py_return(code, offset, retval):
                 import_stack.pop()
             elif rel in import_stack:
                 del import_stack[import_stack.index(rel):]
+            ensure_wrapped()
             mon.restart_events()
             return None
     return mon.DISABLE
@@ -130,34 +132,48 @@ def _wrap_init(cls):
 
     def __init__(self, *a, **k):
         t = type(self)
-        if t not in _seen_types:
-            _seen_types.add(t)
-            s = data_classes.setdefault(current, set())
+        top = import_stack[-1] if import_stack else None
+        key = (t, top)
+        if key not in _seen_types:
+            _seen_types.add(key)
+            names = []
             for c in t.__mro__:
                 m = getattr(c, "__module__", "") or ""
                 if m.startswith("sqlglot"):
-                    s.add(f"{m}:{c.__qualname__}")
+                    names.append(f"{m}:{c.__qualname__}")
+            data_classes.setdefault(current, set()).update(names)
+            if top:
+                for nm in names:
+                    data_class_imports.setdefault(nm, set()).add(top)
         return orig(self, *a, **k)
 
     cls.__init__ = __init__
 
 
-def ensure_wrapped():
-    global _wrapped
-    if _wrapped or "sqlglot.generator" not in sys.modules:
-        return
-    _wrapped = True
-    try:
-        from sqlglot.dialects.dialect import Dialect
-        from sqlglot.expressions.core import Expr
-        from sqlglot.generator import Generator
-        from sqlglot.parser import Parser
-        from sqlglot.tokens import Tokenizer
+_TARGETS = [
+    ("sqlglot.expressions.core", "Expr"),
+    ("sqlglot.tokens", "Tokenizer"),
+    ("sqlglot.parser", "Parser"),
+    ("sqlglot.generator", "Generator"),
+    ("sqlglot.dialects.dialect", "Dialect"),
+]
+_done_targets = set()
 
-        for c in (Dialect, Parser, Generator, Tokenizer, Expr):
-            _wrap_init(c)
-    except Exception as e:  # pragma: no cover
-        print("covcore wrap failed", repr(e), file=sys.stderr)
+
+def ensure_wrapped():
+    if len(_done_targets) == len(_TARGETS):
+        return
+    for modname, clsname in _TARGETS:
+        if (modname, clsname) in _done_targets:
+            continue
+        mod = sys.modules.get(modname)
+        cls = getattr(mod, clsname, None) if mod is not None else None
+        if cls is not None:
+            _done_targets.add((modname, clsname))
+            try:
+                _wrap_init(cls)
+            except Exception as e:  # pragma: no cover
+                print("covcore wrap failed", repr(e), file=sys.stderr)
 
 
 def install():
@@ -188,6 +204,7 @@ def dump(path):
         "files": {t: sorted(s) for t, s in data_files.items()},
         "classes": {t: sorted(s) for t, s in data_classes.items()},
         "imports": {f: {str(l): sorted(m) for l, m in d.items()} for f, d in data_imports.items()},
+        "class_imports": {c: sorted(m) for c, m in data_class_imports.items()},
     }
     tmp = f"{path}.tmp{os.getpid()}"
     with _orig_open(tmp, "w") as f:

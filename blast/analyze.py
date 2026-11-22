@@ -39,6 +39,9 @@ class Map:
         self.importers = meta["importers"]
         self.lined = set(meta["lined"])
         self.implines = meta.get("implines", {})
+        self.classimports = meta.get("classimports", {})
+        self.isolated_ids = set(meta.get("isolated", ()))
+        self.isolated = {t["number"] for t in tests if t["id"] in self.isolated_ids}
         self.by_file = {}
         self.by_class = {}
         for t in tests:
@@ -275,6 +278,8 @@ class Result:
         self.notes = []
         self.broken = False  # a module no longer parses
         self.focus = []  # (file, first line, last line) of functions whose body changed
+        self.cold = False  # something other than function bodies changed: needs a fresh import
+        self.hot_lines = {}  # file -> changed line numbers (when line numbering is unchanged)
         self.focused = set()  # candidates that came from executing those functions
 
 
@@ -387,7 +392,10 @@ class Analyzer:
         rel = new_rel
         if old_text == new_text:
             return
-        res.cands |= m.openers(rel)
+        opened = m.openers(rel)
+        res.cands |= opened
+        if opened or not rel.startswith("sqlglot/") or any(h[1] != h[3] for h in fp.hunks):
+            res.cold = True
         if rel.endswith(".py") and rel.startswith(("sqlglot/", "tests/")):
             self._py(rel, fp, old_text, new_text, res)
         else:
@@ -396,6 +404,7 @@ class Analyzer:
     # -- non-Python files (fixtures, data) --
     def _nonpy(self, rel, res, binary=False):
         m = self.map
+        res.cold = True
         got = m.openers(rel)
         res.cands |= got
         if got:
@@ -423,6 +432,7 @@ class Analyzer:
 
     def _removed_file(self, rel, res):
         m = self.map
+        res.cold = True
         res.cands |= m.openers(rel)
         if rel.endswith(".py"):
             res.broken = True
@@ -433,6 +443,7 @@ class Analyzer:
 
     def _new_file(self, rel, text, res):
         m = self.map
+        res.cold = True
         parent = rel.rsplit("/", 1)[0] if "/" in rel else "."
         res.cands |= m.openers("dir:" + parent)
         if self.read(rel) is not None:
@@ -458,11 +469,13 @@ class Analyzer:
             new_tree = ast.parse(new_text)
         except (SyntaxError, ValueError, RecursionError):
             res.broken = True
+            res.cold = True
             res.cands |= m.importer_tests(rel) | m.file_tests(rel) | m.by_file.get(rel, set())
             res.notes.append(f"{rel} no longer parses")
             return
         s = self.src(rel)
         if s is None:
+            res.cold = True
             res.cands |= m.importer_tests(rel) | m.file_tests(rel) | m.by_file.get(rel, set())
             return
         if ast.dump(s.tree) == ast.dump(new_tree):
@@ -472,6 +485,7 @@ class Analyzer:
                 return
         removed, inserts = patchlib.changed_old_lines(fp)
         removed_set = set(removed)
+        res.hot_lines[rel] = sorted(removed_set)
         new_lines_for = {}
         for after, texts in inserts.items():
             new_lines_for[after] = texts
@@ -511,6 +525,8 @@ class Analyzer:
                 v = il.get(str(ln))
                 if v:
                     mods.update(v)
+            if mods:
+                res.cold = True
             for mod in mods:
                 res.cands |= self.module_users(mod)
 
@@ -547,6 +563,7 @@ class Analyzer:
         st = s.innermost(line)
         if st is None:
             # not inside any statement: treat like an insertion point
+            res.cold = True
             self._insert(rel, s, line - 1, ["?"], res)
             return
         start, end, node, func, qual = st
@@ -559,6 +576,7 @@ class Analyzer:
             return
         # module or class level
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            res.cold = True
             self._cov(rel, start, end, res)
             if line < node.lineno:  # a decorator
                 self._import_time(rel, s, node, qual, res, done)
@@ -579,6 +597,7 @@ class Analyzer:
                 lo, hi = s.header(node)
                 self._cov(rel, lo, hi, res)
                 return
+        res.cold = True
         self._import_time(rel, s, node, qual, res, done)
 
     def _import_time(self, rel, s, node, qual, res, done, depth=0):
@@ -674,7 +693,16 @@ class Analyzer:
                     if cn == c:
                         res.cands |= nums
             return
-        users = m.class_users(f"{module_name(rel)}:{qual}")
+        key = f"{module_name(rel)}:{qual}"
+        users = m.class_users(key)
+        at_import = m.classimports.get(key)
+        if at_import:
+            # the class is instantiated while these modules import: their users are exposed too
+            extra = set()
+            for mod in at_import:
+                extra |= self.module_users(mod)
+            res.cands |= extra
+            users = users or set()
         if users is not None:
             readers = self._attr_readers(names) if stmt_is_plain else None
             if readers is None:
@@ -763,6 +791,7 @@ class Analyzer:
         cookie = after < 2 and any(CODING.match(t) for t in texts)
         if not real and not cookie and not s.in_string(after + 1):
             return
+        res.cold = True
         fa = s.func_at(after) if after >= 1 else None
         fb = s.func_at(after + 1)
         f = fa or fb
