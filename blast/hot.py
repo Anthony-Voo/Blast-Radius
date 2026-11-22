@@ -208,8 +208,47 @@ def _all_codes(code):
     return out
 
 
+def probe_import(src, rel, text):
+    """Does the patched module's top-level code still execute? Returns an error string or None.
+
+    The module body is executed in a scratch namespace inside a throw-away
+    child, against the already imported rest of sqlglot."""
+    import builtins
+
+    filename = os.path.join(src, *rel.split("/"))
+    name = rel[:-3].replace("/", ".")
+    package = name.rpartition(".")[0]
+    if name.endswith(".__init__"):
+        name = name[: -len(".__init__")]
+        package = name
+    live = sys.modules.get(name)
+    ns = {
+        "__name__": name,
+        "__file__": filename,
+        "__package__": package,
+        "__builtins__": builtins,
+        "__spec__": getattr(live, "__spec__", None),
+        "__loader__": getattr(live, "__loader__", None),
+    }
+    if live is not None and hasattr(live, "__path__"):
+        ns["__path__"] = live.__path__
+    try:
+        exec(compile(text, filename, "exec", dont_inherit=True), ns)
+    except BaseException as e:  # noqa: BLE001
+        return repr(e)[:200]
+    return None
+
+
 def handle(src, request, emit_line):
     """Run inside the forked child: patch, then run the tests."""
+    if "probe" in request:
+        bad = None
+        for rel, text in request["probe"].items():
+            bad = probe_import(src, rel, text)
+            if bad:
+                break
+        emit_line("PROBE bad " + bad.replace("\n", " ") if bad else "PROBE ok")
+        return
     try:
         for rel, item in request["files"].items():
             apply_patch(src, rel, item["text"], item["changed"], item["import_lines"])
@@ -412,6 +451,53 @@ class Worker:
                 self.dead = True
                 return "dead", results, False, cpu
         return status, results, (done and not stopped), cpu
+
+    def probe(self, files, timeout=20.0):
+        """True if every patched module still imports, False if one fails, None if unknown."""
+        import signal
+        import time
+
+        if self.dead:
+            return None
+        if self.pid is None:
+            self.start()
+            if self.dead:
+                return None
+        payload = json.dumps({"probe": files}).encode("utf-8")
+        try:
+            data = str(len(payload)).encode() + b"\n" + payload
+            while data:
+                data = data[os.write(self.req, data):]
+        except OSError:
+            self.dead = True
+            return None
+        deadline = time.monotonic() + timeout
+        verdict = None
+        child = None
+        while True:
+            line = self._line(0.05)
+            if line is None and self.dead:
+                return None
+            if line:
+                parts = line.split()
+                if parts[0] == "E":
+                    return verdict
+                if parts[0] == "PID":
+                    child = int(parts[1])
+                elif parts[0] == "PROBE":
+                    verdict = len(parts) > 1 and parts[1] == "ok"
+                continue
+            if time.monotonic() > deadline:
+                if child:
+                    try:
+                        os.kill(child, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    child = None
+                    verdict = False  # a module that hangs on import is as good as broken
+                if time.monotonic() > deadline + 15:
+                    self.dead = True
+                    return None
 
     def close(self):
         if self.pid is None:

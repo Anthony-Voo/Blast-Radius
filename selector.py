@@ -144,9 +144,38 @@ def main():
                     for r, t in res.changed.items())
         )
 
-    n_hot = sum(1 for _, res in plans if res is not None and not res.static_all and res.cands and hot_eligible(res))
-    worker = hot.Worker(SRC) if n_hot >= HOT_MIN else None
-    log(f"{len(commits)} commits, {n_hot} eligible for the warm worker")
+    def needs_probe(res):
+        """Import-time code of a sqlglot module changed: it may no longer import."""
+        return (
+            res.cold and not res.broken
+            and any(t is not None and r in res.hot_lines and r.startswith("sqlglot/") for r, t in res.changed.items())
+        )
+
+    live = [res for _, res in plans if res is not None and not res.static_all]
+    n_hot = sum(1 for res in live if res.cands and hot_eligible(res))
+    n_probe = sum(1 for res in live if needs_probe(res))
+    worker = hot.Worker(SRC) if runner.HAS_FORK and not NO_HOT and (n_hot >= HOT_MIN or n_probe >= 1) else None
+    log(f"{len(commits)} commits, {n_hot} eligible for the warm worker, {n_probe} import checks")
+
+    def import_broken(c, res):
+        """True when a patched module fails to import (then every test is exposed)."""
+        if not needs_probe(res):
+            return False
+        files = {r: t for r, t in res.changed.items() if t is not None and r in res.hot_lines and r.startswith("sqlglot/")}
+        verdict = worker.probe(files) if worker is not None else None
+        if verdict is None and runner.HAS_FORK:
+            # no warm worker: import the patched modules in a fresh fork instead
+            try:
+                tree.apply(res.changed)
+                results, _, cpu = runner.run_tests(tree.work, [], 30.0, probe=[module_name(r) for r in files])
+                state["fresh_cpu"] += cpu
+                verdict = not any(i <= -10 for i in results)
+            finally:
+                tree.restore()
+        if verdict is False:
+            log(c, "a patched module no longer imports: selecting every test")
+            return True
+        return False
 
     def stopper(plan):
         seen = {"n": 0}
@@ -209,6 +238,12 @@ def main():
             log(c, "ALL", (res.notes if res else ""))
             continue
         cands = set(res.cands) & all_nums
+        try:
+            if import_broken(c, res):
+                answers[c] = set(all_nums)
+                continue
+        except Exception as e:  # noqa: BLE001
+            log(c, "import check crashed:", repr(e))
         if not cands:
             answers[c] = set()
             log(c, "none", res.notes)
