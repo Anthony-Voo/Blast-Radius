@@ -42,6 +42,7 @@ P = {
     "wide_probe": _f("BLAST_WIDE_PROBE", "30"),  # cheap tests spot-checked when a large set is emitted unverified  # ... with this share of run tests failing mean "everything is broken"
     "clean_rule": _f("BLAST_CLEAN_RULE", "3"),  # with clean evidence clear: 0 path-covered tests; 1 those and slow ones; 2 all; 3 slow ones only
     "nonslow_full": _f("BLAST_NONSLOW_FULL", "8.0"),  # run every non-slow candidate when that costs no more than this
+    "rare_frac": _f("BLAST_RARE_FRAC", "0"),  # experimental, off: drop slow tests when under this share of evidence fails
     "min_evidence": _f("BLAST_MIN_EVIDENCE", "10"),  # fewer run tests than this is not evidence about the rest
 }
 
@@ -206,8 +207,11 @@ def finalize(plan, results, est, p=P):
             continue
         if failed:
             # Something broke. Whether an unrun test hits the same problem depends
-            # on its data, not just its path, so nothing unrun can be cleared.
-            keep.add(n)
+            # on its data, not just its path, so nothing unrun can be cleared
+            # (unless the experimental "rare_frac" rule is switched on).
+            if not (p["rare_frac"] > 0 and strong and len(ran) >= 50 and len(failed) < p["rare_frac"] * len(ran)
+                    and est(n) > p["giant_est"]):
+                keep.add(n)
         elif n in focused:
             # Nothing failed: clear a test once passing tests executed every
             # line it executes in the changed function.

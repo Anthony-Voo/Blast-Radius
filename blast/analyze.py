@@ -40,6 +40,8 @@ class Map:
         self.lined = set(meta["lined"])
         self.implines = meta.get("implines", {})
         self.classimports = meta.get("classimports", {})
+        self.pairdeps = meta.get("pairdeps", {})
+        self.num_by_id = num_by_id
         self.isolated_ids = set(meta.get("isolated", ()))
         self.isolated = {t["number"] for t in tests if t["id"] in self.isolated_ids}
         self.by_file = {}
@@ -238,6 +240,17 @@ class Src:
         return False
 
 
+def _pairs(text):
+    """The (inputs, expected) halves of a fixture, as tests/helpers.load_sql_fixture_pairs splits it."""
+    st = "\n".join(l for l in text.splitlines() if l and not l.startswith("--")).split(";")
+    ins, exps = [], []
+    for i in range(0, len(st), 2):
+        if i + 1 < len(st):
+            ins.append(st[i].strip())
+            exps.append(st[i + 1].strip())
+    return ins, exps
+
+
 def bound_names(node):
     names = set()
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -285,6 +298,7 @@ class Result:
         self.focus = []  # (file, first line, last line) of functions whose body changed
         self.cold = False  # something other than function bodies changed: needs a fresh import
         self.pinned = set()  # candidates tied to a changed file they read: only running them can clear them
+        self.readers = {}  # data file -> tests exposed to its change
         self.hot_lines = {}  # file -> changed line numbers (when line numbering is unchanged)
         self.focused = set()  # candidates that came from executing those functions
 
@@ -404,7 +418,8 @@ class Analyzer:
         rel = new_rel
         if old_text == new_text:
             return
-        opened = m.openers(rel)
+        opened = self.file_readers(rel, old_text, new_text)
+        res.readers[rel] = opened
         res.cands |= opened
         res.pinned |= opened
         if opened or not rel.startswith("sqlglot/") or any(h[1] != h[3] for h in fp.hunks):
@@ -414,14 +429,41 @@ class Analyzer:
         else:
             self._nonpy(rel, res)
 
+    def file_readers(self, rel, old_text, new_text):
+        """Tests exposed to a change of data file `rel`.
+
+        Normally every test that opens it. For a fixture that a class loads once
+        in setUpClass, the map also records (from corrupting each half of the
+        file at the pinned commit) which tests of the class depend on its input
+        statements and which on its expected statements; the rest are dropped."""
+        m = self.map
+        opened = m.openers(rel)
+        pd = m.pairdeps.get(rel)
+        if not pd or pd.get("loader") != "pairs" or old_text is None or new_text is None:
+            return opened
+        class_tests = set()
+        for prefix in pd["classes"]:
+            f, c = prefix.split("::")
+            class_tests |= m.by_class.get((f, c), set())
+        old_in, old_exp = _pairs(old_text)
+        new_in, new_exp = _pairs(new_text)
+        deps = set()
+        if old_in != new_in:
+            deps |= {m.num_by_id[i] for i in pd["input"] if i in m.num_by_id}
+        if old_exp != new_exp:
+            deps |= {m.num_by_id[i] for i in pd["expected"] if i in m.num_by_id}
+        return (opened - class_tests) | deps
+
     # -- non-Python files (fixtures, data) --
     def _nonpy(self, rel, res, binary=False):
         m = self.map
         res.cold = True
-        got = m.openers(rel)
+        got = res.readers.get(rel)
+        if got is None:
+            got = m.openers(rel)
         res.cands |= got
         res.pinned |= got
-        if got:
+        if got or m.openers(rel):
             return
         if not rel.startswith(("tests/", "sqlglot/")):
             res.notes.append(f"unreferenced file {rel}")

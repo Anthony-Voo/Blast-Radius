@@ -101,7 +101,8 @@ for f, s_ in files.items():
     if f.endswith(".py") or f.startswith("dir:"):
         for i in s_: isolated.add(ids[i])
 print("isolated tests", len(isolated))
-meta = {"tests": ids, "cost": cost, "isolated": sorted(isolated),
+pairdeps = json.load(open("fixturedeps.json")) if os.path.exists("fixturedeps.json") else {}
+meta = {"tests": ids, "cost": cost, "isolated": sorted(isolated), "pairdeps": pairdeps,
         "files": {f: bits(s) for f, s in files.items()},
         "classes": {c: bits(s) for c, s in classes.items()},
         "importers": imp, "lined": sorted(lines),
