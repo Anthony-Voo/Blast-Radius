@@ -4,7 +4,7 @@ cov, tests_json, times_json, outdir = sys.argv[1:5]
 tests = json.load(open(tests_json))["tests"]
 ids = [t["id"] for t in tests]
 idx = {t: i for i, t in enumerate(ids)}
-lines, files, classes = {}, {}, {}
+lines, files, classes, implines = {}, {}, {}, {}
 srcs = [os.path.join(cov, "map.json")] + sorted(glob.glob(os.path.join(cov, "map.json.child.*.json")))
 for p in srcs:
     d = json.load(open(p))
@@ -18,6 +18,9 @@ for p in srcs:
         i = idx.get(t)
         if i is None: continue
         for f in fs: files.setdefault(f, set()).add(i)
+    for f, lm in d.get("imports", {}).items():
+        for l, mods in lm.items():
+            implines.setdefault(f, {}).setdefault(l, set()).update(mods)
     for t, cs in d["classes"].items():
         i = idx.get(t)
         if i is None: continue
@@ -50,7 +53,8 @@ for tf, mods in importers.items():
 meta = {"tests": ids, "cost": cost,
         "files": {f: bits(s) for f, s in files.items()},
         "classes": {c: bits(s) for c, s in classes.items()},
-        "importers": imp, "lined": sorted(lines)}
+        "importers": imp, "lined": sorted(lines),
+        "implines": {f: {l: sorted(m) for l, m in d.items()} for f, d in implines.items()}}
 with gzip.open(os.path.join(outdir, "meta.json.gz"), "wt", compresslevel=9) as g:
     json.dump(meta, g, separators=(",", ":"))
 total += os.path.getsize(os.path.join(outdir, "meta.json.gz"))

@@ -38,6 +38,7 @@ class Map:
         self.classes = meta["classes"]
         self.importers = meta["importers"]
         self.lined = set(meta["lined"])
+        self.implines = meta.get("implines", {})
         self.by_file = {}
         self.by_class = {}
         for t in tests:
@@ -283,6 +284,7 @@ class Analyzer:
         self._text = {}
         self._pyfiles = None
         self._subclasses = None
+        self._modusers = {}
 
     # -- source access (always the pinned, unpatched tree) --
     def read(self, rel):
@@ -490,7 +492,31 @@ class Analyzer:
             self._insert(rel, s, after, texts, res)
 
     def _cov(self, rel, lo, hi, res):
-        res.cands |= self.map.line_tests(rel, lo, hi)
+        m = self.map
+        res.cands |= m.line_tests(rel, lo, hi)
+        # Lines that also run while some module is being imported change that
+        # module's import-time state, so everything using the module is exposed.
+        il = m.implines.get(rel)
+        if il:
+            mods = set()
+            for ln in range(lo, hi + 1):
+                v = il.get(str(ln))
+                if v:
+                    mods.update(v)
+            for mod in mods:
+                res.cands |= self.module_users(mod)
+
+    def module_users(self, mod):
+        r = self._modusers.get(mod)
+        if r is None:
+            m = self.map
+            r = m.importer_tests(mod) | m.file_tests(mod) | m.by_file.get(mod, set())
+            prefix = module_name(mod) + ":"
+            for key, bits in m.classes.items():
+                if key.startswith(prefix):
+                    r |= m.decode(bits)
+            self._modusers[mod] = r
+        return r
 
     def _old_line(self, rel, s, line, repl, res, done):
         st = s.innermost(line)
@@ -546,7 +572,10 @@ class Analyzer:
             for c in s.classes:
                 if c[3] == qual:
                     cls = c[2]
-            self._class_change(rel, s, qual, cls, names, res, done, depth)
+            plain = isinstance(node, (ast.Assign, ast.AnnAssign)) and all(
+                isinstance(x, ast.Name) for x in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            )
+            self._class_change(rel, s, qual, cls, names, res, done, depth, stmt_is_plain=plain)
             return
         if rel.startswith("tests/"):
             res.cands |= m.by_file.get(rel, set()) | m.importer_tests(rel)
@@ -558,7 +587,60 @@ class Analyzer:
         for name in names:
             self._name_refs(rel, name, res, done, depth)
 
-    def _class_change(self, rel, s, qual, cls_node, names, res, done, depth):
+    def _attr_readers(self, names):
+        """Tests that execute code reading any of these class attributes, or None
+        when some read happens at import time (then every user of the class is exposed)."""
+        if not names:
+            return None
+        m = self.map
+        out = set()
+        for name in names:
+            if len(name) < 3:
+                return None
+            pat = re.compile(r"(?<![\w])" + re.escape(name) + r"(?![\w])")
+            for f in self.pyfiles():
+                t = self.read(f)
+                if not t or name not in t:
+                    continue
+                hits = [i + 1 for i, l in enumerate(t.split("\n")) if name in l and pat.search(l)]
+                if not hits:
+                    continue
+                s2 = self.src(f)
+                if s2 is None:
+                    return None
+                il = m.implines.get(f, {})
+                for line in hits:
+                    st = s2.innermost(line)
+                    if st is None:
+                        if s2.trivial(line):
+                            continue
+                        return None
+                    start, end, node, func, qual = st
+                    if func is None:
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            return None  # decorator or default argument: evaluated at import
+                        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                            value = node.value
+                            plain = all(isinstance(x, ast.Name) for x in targets)
+                            reads = value is not None and any(
+                                (isinstance(n, ast.Name) and n.id == name)
+                                or (isinstance(n, ast.Attribute) and n.attr == name)
+                                or (isinstance(n, ast.Constant) and isinstance(n.value, str) and name in n.value)
+                                for n in ast.walk(value)
+                            )
+                            if plain and not reads and qual:
+                                continue  # another class (re)defining the attribute
+                        return None
+                    lo, hi = s2.header(node)
+                    if not (lo <= line <= hi):
+                        lo, hi = start, end
+                    if any(str(ln) in il for ln in range(lo, hi + 1)):
+                        return None  # read while a module is being imported
+                    out |= m.line_tests(f, lo, hi)
+        return out
+
+    def _class_change(self, rel, s, qual, cls_node, names, res, done, depth, stmt_is_plain=False):
         m = self.map
         if rel.startswith("tests/"):
             for c in self._with_subclasses(qual.split(".")[0]):
@@ -568,8 +650,12 @@ class Analyzer:
             return
         users = m.class_users(f"{module_name(rel)}:{qual}")
         if users is not None:
-            res.cands |= users
-            # other code may read the attribute straight off the class
+            readers = self._attr_readers(names) if stmt_is_plain else None
+            if readers is None:
+                res.cands |= users
+            else:
+                res.cands |= users & readers
+                res.notes.append(f"{qual}.{'/'.join(sorted(names))}: {len(users)} users, {len(users & readers)} also read it")
             return
         if cls_node is not None:
             self._cov(rel, Src._start(cls_node), cls_node.end_lineno, res)

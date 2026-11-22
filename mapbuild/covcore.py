@@ -21,6 +21,8 @@ current = "<collect>"
 data_lines: dict = {}
 data_files: dict = {}
 data_classes: dict = {}
+data_imports: dict = {}  # file -> line -> set of modules whose import executed it
+import_stack: list = []
 _seen_types: set = set()
 _norm_cache: dict = {}
 _orig_open = builtins.open
@@ -33,6 +35,7 @@ _installed = False
 def set_current(name):
     global current, _seen_types
     current = name
+    del import_stack[:]
     _seen_types = set()
     mon.restart_events()
     ensure_wrapped()
@@ -63,6 +66,33 @@ def _line(code, line):
         if s is None:
             s = d[rel] = set()
         s.add(line)
+        if import_stack:
+            top = import_stack[-1]
+            if top != rel or code.co_name != "<module>":
+                data_imports.setdefault(rel, {}).setdefault(line, set()).add(top)
+    return mon.DISABLE
+
+
+def _py_start(code, offset):
+    if code.co_name == "<module>":
+        rel = _rel(code.co_filename)
+        if rel:
+            import_stack.append(rel)
+            mon.restart_events()
+            return None
+    return mon.DISABLE
+
+
+def _py_return(code, offset, retval):
+    if code.co_name == "<module>":
+        rel = _rel(code.co_filename)
+        if rel:
+            if import_stack and import_stack[-1] == rel:
+                import_stack.pop()
+            elif rel in import_stack:
+                del import_stack[import_stack.index(rel):]
+            mon.restart_events()
+            return None
     return mon.DISABLE
 
 
@@ -147,7 +177,9 @@ def install():
         pass
     mon.use_tool_id(TOOL, "covmap")
     mon.register_callback(TOOL, mon.events.LINE, _line)
-    mon.set_events(TOOL, mon.events.LINE)
+    mon.register_callback(TOOL, mon.events.PY_START, _py_start)
+    mon.register_callback(TOOL, mon.events.PY_RETURN, _py_return)
+    mon.set_events(TOOL, mon.events.LINE | mon.events.PY_START | mon.events.PY_RETURN)
 
 
 def dump(path):
@@ -155,6 +187,7 @@ def dump(path):
         "lines": {t: {f: sorted(ls) for f, ls in d.items()} for t, d in data_lines.items()},
         "files": {t: sorted(s) for t, s in data_files.items()},
         "classes": {t: sorted(s) for t, s in data_classes.items()},
+        "imports": {f: {str(l): sorted(m) for l, m in d.items()} for f, d in data_imports.items()},
     }
     tmp = f"{path}.tmp{os.getpid()}"
     with _orig_open(tmp, "w") as f:

@@ -320,7 +320,7 @@ def run_tests(tree, tests, wall_limit, probe=(), should_stop=None, rss_limit_mb=
     import subprocess
     import tempfile
 
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         spec_path = os.path.join(td, "spec.json")
         out_path = os.path.join(td, "out.txt")
         with open(spec_path, "w") as f:
@@ -351,7 +351,10 @@ def run_tests(tree, tests, wall_limit, probe=(), should_stop=None, rss_limit_mb=
             if time.monotonic() > deadline or (should_stop is not None and should_stop(results)):
                 stopped = True
                 break
-            time.sleep(0.02)
+            try:
+                time.sleep(0.05)
+            except OSError:
+                pass
         if proc.poll() is None:
             if not stopped:
                 try:
