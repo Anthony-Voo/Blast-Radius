@@ -274,6 +274,8 @@ class Result:
         self.changed = {}  # rel path -> new text (None = deleted)
         self.notes = []
         self.broken = False  # a module no longer parses
+        self.focus = []  # (file, first line, last line) of functions whose body changed
+        self.focused = set()  # candidates that came from executing those functions
 
 
 class Analyzer:
@@ -491,9 +493,15 @@ class Analyzer:
                     continue
             self._insert(rel, s, after, texts, res)
 
-    def _cov(self, rel, lo, hi, res):
+    def _cov(self, rel, lo, hi, res, focus=None):
         m = self.map
-        res.cands |= m.line_tests(rel, lo, hi)
+        got = m.line_tests(rel, lo, hi)
+        res.cands |= got
+        if focus is not None:
+            res.focused |= got
+            span = (rel, focus[0], focus[1])
+            if span not in res.focus:
+                res.focus.append(span)
         # Lines that also run while some module is being imported change that
         # module's import-time state, so everything using the module is exposed.
         il = m.implines.get(rel)
@@ -505,6 +513,23 @@ class Analyzer:
                     mods.update(v)
             for mod in mods:
                 res.cands |= self.module_users(mod)
+
+    def signatures(self, res, tests):
+        """For each test, the lines it executes inside the changed functions."""
+        sig = {n: set() for n in tests}
+        for rel, lo, hi in res.focus:
+            d = self.map._file(rel)
+            lines = d["lines"]
+            for ln in range(lo, hi + 1):
+                j = lines.get(str(ln))
+                if j is None:
+                    continue
+                key = (rel, ln)
+                for n in self.map.decode(d["sets"][j]):
+                    s_ = sig.get(n)
+                    if s_ is not None:
+                        s_.add(key)
+        return {n: frozenset(v) for n, v in sig.items()}
 
     def module_users(self, mod):
         r = self._modusers.get(mod)
@@ -529,7 +554,8 @@ class Analyzer:
             lo, hi = s.header(node)
             if not (lo <= line <= hi):
                 lo, hi = start, end
-            self._cov(rel, lo, hi, res)
+            f = s.func_at(line)
+            self._cov(rel, lo, hi, res, focus=(f[0], f[1]) if f else None)
             return
         # module or class level
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -741,8 +767,9 @@ class Analyzer:
         fb = s.func_at(after + 1)
         f = fa or fb
         if f is not None:
-            self._cov(rel, f[0], f[1], res)
-            if fa is not None and fb is not None and fa[2] is fb[2]:
+            same = fa is not None and fb is not None and fa[2] is fb[2]
+            self._cov(rel, f[0], f[1], res, focus=(f[0], f[1]) if same else None)
+            if same:
                 return
         # module or class level (or the edge of a function)
         c = s.class_at(after + 1) or (s.class_at(after) if after >= 1 else None)

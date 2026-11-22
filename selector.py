@@ -21,7 +21,7 @@ T0 = time.monotonic()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from blast import runner  # noqa: E402
+from blast import policy, runner  # noqa: E402
 from blast.analyze import Analyzer, module_name  # noqa: E402
 
 DATA = os.environ.get("BLAST_DATA", "/data")
@@ -29,7 +29,7 @@ SRC = os.environ.get("BLAST_SRC", "/opt/sqlglot")
 MAPDIR = os.environ.get("BLAST_MAP", os.path.join(HERE, "map"))
 WORK = os.environ.get("BLAST_WORK", "/tmp/bt")
 WALL_BUDGET = float(os.environ.get("BLAST_WALL", "140"))
-SCALE = float(os.environ.get("BLAST_SCALE", "2.0"))  # scorer CPU seconds per map-build CPU second
+SCALE = float(os.environ.get("BLAST_SCALE", "3.5"))  # scorer CPU seconds per map-build CPU second
 RUN_OVERHEAD = float(os.environ.get("BLAST_OVERHEAD", "0.8"))
 GIANT = float(os.environ.get("BLAST_GIANT", "4.0"))  # estimated CPU seconds above which a test is never run
 RUN_MARGIN = float(os.environ.get("BLAST_MARGIN", "1.0"))
@@ -46,27 +46,6 @@ MAX_WORKERS = 8
 
 def log(*a):
     print(*a, file=sys.stderr, flush=True)
-
-
-def split(nums, ms):
-    """Best split found over 1..8 workers: (cost_ms, workers)."""
-    if not nums:
-        return 0, []
-    order = sorted(nums, key=lambda n: (-ms[n], n))
-    best = None
-    for k in range(1, min(MAX_WORKERS, len(order)) + 1):
-        loads = [0] * k
-        buckets = [[] for _ in range(k)]
-        for n in order:
-            i = loads.index(min(loads))
-            loads[i] += ms[n]
-            buckets[i].append(n)
-        cost = max(loads) + WORKER_MS * k
-        if best is None or cost < best[0]:
-            best = (cost, buckets)
-        if max(loads) == ms[order[0]]:
-            break  # the longest test already bounds the busiest worker
-    return best[0], [sorted(b) for b in best[1] if b]
 
 
 class Tree:
@@ -176,31 +155,26 @@ def main():
             answers[c] = set()
             log(c, "none", res.notes)
             continue
-        giants = {n for n in cands if est(n) > GIANT}
-        runnable = cands - giants
-        emit_cost = split(cands, ms)[0] / 1000.0
-        heavy = any(tid[n].startswith(HEAVY) for n in runnable)
-        run_est = sum(est(n) for n in runnable) + RUN_OVERHEAD
-        if heavy and not heavy_loaded:
-            run_est += PRELOAD
+        heavy = any(tid[n].startswith(HEAVY) for n in cands)
         only_data = all(not r.endswith(".py") for r in res.changed)
-        p_fail = P_FAIL_DATA if only_data else P_FAIL
-        if giants:
-            exp_run = (1 - p_fail) * (run_est + GIANT_RISK) + p_fail * (0.3 * run_est + emit_cost)
-        else:
-            exp_run = run_est + p_fail * min(emit_cost, 2.6)
+        sig = an.signatures(res, cands) if res.focus else None
+        plan = policy.make_plan(
+            cands, ms, est, focused=res.focused, sig=sig, data_only=only_data, broken=res.broken,
+            extra_overhead=(policy.P["preload"] if heavy and not heavy_loaded else 0.0),
+        )
         remaining = WALL_BUDGET - (time.monotonic() - T0)
-        want_run = bool(runnable) and not NO_RUN and (res.broken or exp_run + RUN_MARGIN < emit_cost)
-        if want_run and remaining < run_est * 1.5 + 8:
+        want_run = plan.mode == "run" and not NO_RUN
+        if want_run and remaining < plan.run_est * 1.5 + 8:
             log(c, "no time left to run; emitting candidates")
             want_run = False
         if not want_run:
             answers[c] = cands
-            log(c, f"emit {len(cands)} cands cost={emit_cost:.1f} run_est={run_est:.1f} exp_run={exp_run:.1f} giants={len(giants)}", res.notes)
+            log(c, f"emit {len(cands)} cands cost={plan.emit_cost:.1f} run_est={plan.run_est:.1f} "
+                   f"exp={plan.exp_cost:.1f} prefix={len(plan.prefix)} rest={len(plan.rest)}", res.notes)
             continue
         answer = None
         try:
-            if heavy and not heavy_loaded:
+            if heavy and not heavy_loaded and any(tid[n].startswith(HEAVY) for n in plan.prefix):
                 heavy_loaded = True
                 if runner.HAS_FORK:
                     try:
@@ -210,46 +184,36 @@ def main():
                     except Exception as e:  # noqa: BLE001
                         log("preload failed", repr(e))
             tree.apply(res.changed)
-            class_cost = {}
-            for n in runnable:
-                k = tid[n].rsplit("::", 1)[0]
-                class_cost[k] = class_cost.get(k, 0.0) + est(n)
-            ordered = sorted(runnable, key=lambda n: (class_cost[tid[n].rsplit("::", 1)[0]], tid[n].rsplit("::", 1)[0], est(n), n))
+            ordered = policy.run_order(plan.prefix, tid, est)
             spec = [(n, tid[n], max(1.5, est(n) * 6 + 1.0)) for n in ordered]
             probe_files = [r for r, t in res.changed.items() if t is not None and r.endswith(".py") and r.startswith("sqlglot/")]
             probe = [module_name(r) for r in probe_files]
-            wall = min(remaining - 6, max(6.0, run_est * 4 + 6))
+            wall = min(remaining - 6, max(6.0, plan.run_est * 4 + 6))
             state = {"n": 0}
 
-            def should_stop(results, runnable=runnable, giants=giants, state=state):
+            def stop(results, plan=plan, state=state):
                 if len(results) == state["n"]:
                     return False
                 state["n"] = len(results)
-                bad = {n for n in runnable if results.get(n) == "F"}
-                if not bad and not any(i <= -10 for i in results):
+                if any(i <= -10 for i in results):
                     return False
-                if giants:
-                    return True  # the slow tests get emitted anyway and hide the rest
-                rest = {n for n in runnable if n not in results}
-                if not rest:
-                    return False
-                stop_cost = split(bad | rest, ms)[0] / 1000.0
-                go_cost = sum(est(n) for n in rest) + split(bad, ms)[0] / 1000.0
-                return stop_cost <= go_cost + 0.05
+                return policy.should_stop(plan, results, ms, est)
 
             t1 = time.monotonic()
-            results, complete, cpu = runner.run_tests(tree.work, spec, wall, probe=probe, should_stop=should_stop)
+            results, complete, cpu = runner.run_tests(tree.work, spec, wall, probe=probe, should_stop=stop)
             child_cpu += cpu
-            failed = {n for n in runnable if results.get(n) != "P"}
-            hard = {n for n in runnable if results.get(n) == "F"}
+            answer = policy.finalize(plan, results, est)
+            if answer is None:
+                answer = set(all_nums)
+            hard = sum(1 for n in plan.prefix if results.get(n) == "F")
             broken_imports = [probe_files[-10 - i] for i in results if i <= -10 and -10 - i < len(probe_files)]
             for r in broken_imports:
-                failed |= an.map.importer_tests(r) & all_nums
-            log(c, f"ran {len(results)}/{len(runnable)} wall={time.monotonic() - t1:.2f}s cpu={cpu:.2f}s est={run_est:.1f} "
-                   f"failed={len(hard)} kept={len(failed)} complete={complete} broken={broken_imports} giants={len(giants)}", res.notes)
-            if giants and (failed or GIANT_POLICY == "emit"):
-                failed |= giants
-            answer = failed
+                answer |= an.map.importer_tests(r) & all_nums
+            if broken_imports:
+                answer |= plan.cands - {n for n in plan.prefix if results.get(n) == "P"}
+            log(c, f"ran {sum(1 for n in plan.prefix if n in results)}/{len(plan.prefix)} of {len(cands)} wall={time.monotonic() - t1:.2f}s "
+                   f"cpu={cpu:.2f}s est={plan.run_est:.1f} failed={hard} rest={len(plan.rest)} focused={len(plan.focused)} "
+                   f"emit={len(answer)} complete={complete} broken={broken_imports}", res.notes)
         except Exception as e:  # noqa: BLE001
             log(c, "run crashed:", repr(e))
             answer = None
@@ -267,7 +231,7 @@ def main():
         sel = answers.get(c)
         if sel is None:
             sel = set(all_nums)
-        cost_ms, workers = split(sel, ms)
+        cost_ms, workers = policy.split(sel, ms)
         total += cost_ms
         out.append(json.dumps({"commit": c, "workers": workers}, separators=(",", ":")))
     log(f"simulated {total / 1000:.1f}s over {len(commits)} commits; wall {time.monotonic() - T0:.1f}s "
