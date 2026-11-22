@@ -34,6 +34,7 @@ SCALE = float(os.environ.get("BLAST_SCALE", "3.5"))  # scorer CPU seconds per ma
 NO_RUN = os.environ.get("BLAST_NORUN") == "1"
 NO_HOT = os.environ.get("BLAST_NOHOT") == "1"
 HOT_OVERHEAD = float(os.environ.get("BLAST_HOT_OVERHEAD", "0.5"))
+SLOW_GUARD = float(os.environ.get("BLAST_SLOW_GUARD", "0"))  # 0 = off; else keep slow tests when evidence ran this many times slower than expected
 HOT_MIN = int(os.environ.get("BLAST_HOT_MIN", "2"))  # warm worker only pays off with a few uses
 HEAVY = ("tests/test_optimizer", "tests/test_executor")
 
@@ -297,7 +298,7 @@ def main():
             answer = policy.finalize(plan, results, est)
             if answer is None:
                 answer = set(all_nums)
-            elif cpu > 2.0 * plan.run_est + 1.0:
+            elif SLOW_GUARD > 0 and cpu > SLOW_GUARD * plan.run_est + 1.0:
                 # The evidence ran far slower than expected: the change may push the
                 # slowest tests past a time limit, so none of them is dropped.
                 slow = {n for n in plan.cands if n not in results and est(n) > policy.P["giant_est"]}
