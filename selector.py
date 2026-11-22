@@ -256,7 +256,7 @@ def main():
             heavy = any(tid[n].startswith(HEAVY) for n in cands)
             only_data = all(not r.endswith(".py") for r in res.changed)
             sig = an.signatures(res, cands) if res.focus else None
-            kw = dict(focused=res.focused, sig=sig, data_only=only_data, broken=res.broken)
+            kw = dict(focused=res.focused, sig=sig, data_only=only_data, broken=res.broken, pinned=res.pinned)
             cold_extra = policy.P["preload"] if heavy and not state["heavy"] else 0.0
             plan = None
             use_hot = False

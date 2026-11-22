@@ -284,6 +284,7 @@ class Result:
         self.broken = False  # a module no longer parses
         self.focus = []  # (file, first line, last line) of functions whose body changed
         self.cold = False  # something other than function bodies changed: needs a fresh import
+        self.pinned = set()  # candidates tied to a changed file they read: only running them can clear them
         self.hot_lines = {}  # file -> changed line numbers (when line numbering is unchanged)
         self.focused = set()  # candidates that came from executing those functions
 
@@ -405,6 +406,7 @@ class Analyzer:
             return
         opened = m.openers(rel)
         res.cands |= opened
+        res.pinned |= opened
         if opened or not rel.startswith("sqlglot/") or any(h[1] != h[3] for h in fp.hunks):
             res.cold = True
         if rel.endswith(".py") and rel.startswith(("sqlglot/", "tests/")):
@@ -418,6 +420,7 @@ class Analyzer:
         res.cold = True
         got = m.openers(rel)
         res.cands |= got
+        res.pinned |= got
         if got:
             return
         if not rel.startswith(("tests/", "sqlglot/")):
@@ -438,6 +441,7 @@ class Analyzer:
         if base in helper or (len(stem) > 3 and stem in helper) or (parent not in ("", "tests", "fixtures") and parent in helper):
             hit |= m.importer_tests("tests/helpers.py")
         res.cands |= hit
+        res.pinned |= hit
         res.cands |= m.openers("dir:" + rel.rsplit("/", 1)[0]) if "/" in rel else set()
         res.notes.append(f"unopened file {rel}: {len(hit)} tests by mention")
 

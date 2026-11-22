@@ -72,7 +72,7 @@ def cost(nums, ms):
 
 
 class Plan:
-    __slots__ = ("mode", "prefix", "rest", "run_est", "emit_cost", "exp_cost", "focused", "sig", "cands", "keep_all")
+    __slots__ = ("mode", "prefix", "rest", "run_est", "emit_cost", "exp_cost", "focused", "sig", "cands", "keep_all", "pinned")
 
     def __init__(self):
         self.mode = "emit"
@@ -85,14 +85,16 @@ class Plan:
         self.sig = {}
         self.cands = set()
         self.keep_all = False  # the run only checks for widespread breakage; nothing unrun is dropped
+        self.pinned = set()  # tests that read a changed file: never dropped without being run
 
 
 def make_plan(cands, ms, est, focused=(), sig=None, data_only=False, broken=False, extra_overhead=0.0,
-              overhead=None, p=P):
+              overhead=None, pinned=(), p=P):
     """Decide between emitting every candidate and running a chosen prefix."""
     plan = Plan()
     cands = set(cands)
     plan.cands = cands
+    plan.pinned = set(pinned) & cands
     plan.emit_cost = cost(cands, ms)
     plan.sig = sig or {}
     plan.focused = (set(focused) & cands) if sig else set()
@@ -151,7 +153,7 @@ def make_plan(cands, ms, est, focused=(), sig=None, data_only=False, broken=Fals
     pf = p["p_fail_data"] if data_only else p["p_fail"]
     clean_cost = cost(finalize(plan, {n: "P" for n in chosen}, est, p) or (), ms)
     if plan.rest:
-        slow = {n for n in plan.rest if est(n) > p["giant_est"]}
+        slow = {n for n in plan.rest if est(n) > p["giant_est"]} - plan.pinned
         fail_cost = 0.5 * plan.emit_cost + 0.5 * cost(cands - slow, ms)
     else:
         fail_cost = min(plan.emit_cost, 2.6)
@@ -197,6 +199,10 @@ def finalize(plan, results, est, p=P):
         return plan.cands - {n for n in ran if results[n] == "P"}
     for n in plan.cands:
         if n in results:
+            continue
+        if n in plan.pinned:
+            # It reads a file the patch changed; other tests passing says nothing about it.
+            keep.add(n)
             continue
         if failed:
             # Something broke. Whether an unrun test hits the same problem depends
