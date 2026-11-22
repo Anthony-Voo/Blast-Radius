@@ -265,6 +265,10 @@ def serve(src, req_fd, resp_fd):
         if pid == 0:
             code = 0
             try:
+                try:
+                    os.setsid()
+                except Exception:  # noqa: BLE001
+                    pass
                 os.write(resp_fd, f"PID {os.getpid()}\n".encode())
                 handle(src, request, lambda s: os.write(resp_fd, (s + "\n").encode()))
             except BaseException:  # noqa: BLE001
@@ -297,6 +301,7 @@ class Worker:
             try:
                 os.close(req_w)
                 os.close(resp_r)
+                runner.close_answers_fd()
                 dn = os.open(os.devnull, os.O_RDWR)
                 os.dup2(dn, 0)
                 os.dup2(dn, 1)
@@ -391,15 +396,18 @@ class Worker:
                         results[idx] = parts[1]
                     if not killed and should_stop is not None and not done and should_stop(results):
                         stopped = True
-                continue
+                if not (stopped and not killed):
+                    continue
             over = time.monotonic() > deadline
             if child and not killed and (over or stopped or runner._rss_mb(child) > rss_limit_mb):
                 stopped = True
                 killed = True
-                try:
-                    os.kill(child, signal.SIGKILL)
-                except OSError:
-                    pass
+                for kill in (getattr(os, "killpg", None), os.kill):
+                    try:
+                        if kill is not None:
+                            kill(child, signal.SIGKILL)
+                    except OSError:
+                        pass
             if over and time.monotonic() > deadline + 15:
                 self.dead = True
                 return "dead", results, False, cpu

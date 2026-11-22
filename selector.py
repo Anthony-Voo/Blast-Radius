@@ -295,6 +295,7 @@ if __name__ == "__main__":
     # Keep the real stdout private so nothing but answers can reach it.
     real = os.dup(1)
     os.dup2(2, 1)
+    os.environ["BLAST_REAL_FD"] = str(real)
     try:
         payload = main()
     except BaseException as e:  # noqa: BLE001

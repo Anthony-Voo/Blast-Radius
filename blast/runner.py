@@ -210,6 +210,16 @@ def child_main(tree, spec, emit):
     emit(-1, "D")
 
 
+def close_answers_fd():
+    """Children must not keep the selector's private stdout open."""
+    fd = os.environ.get("BLAST_REAL_FD")
+    if fd:
+        try:
+            os.close(int(fd))
+        except (OSError, ValueError):
+            pass
+
+
 def _fd_emitter(fd):
     def emit(index, status):
         os.write(fd, f"{index} {status}\n".encode())
@@ -265,6 +275,7 @@ def run_tests(tree, tests, wall_limit, probe=(), should_stop=None, rss_limit_mb=
             code = 0
             try:
                 os.close(r)
+                close_answers_fd()
                 try:
                     os.setsid()
                 except Exception:
