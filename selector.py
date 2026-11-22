@@ -297,6 +297,13 @@ def main():
             answer = policy.finalize(plan, results, est)
             if answer is None:
                 answer = set(all_nums)
+            elif cpu > 2.0 * plan.run_est + 1.0:
+                # The evidence ran far slower than expected: the change may push the
+                # slowest tests past a time limit, so none of them is dropped.
+                slow = {n for n in plan.cands if n not in results and est(n) > policy.P["giant_est"]}
+                if slow - answer:
+                    log(c, f"evidence was slow (cpu {cpu:.1f}s vs {plan.run_est:.1f}s expected): keeping {len(slow)} slow tests")
+                answer |= slow
             for r in broken:
                 answer |= an.map.importer_tests(r) & all_nums
             if broken:

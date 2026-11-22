@@ -72,20 +72,25 @@ class Map:
             self._bits[hexbits] = r
         return r
 
-    def _file(self, rel):
-        d = self._lines.get(rel)
+    def _file(self, rel, single=False):
+        """Per-line test sets. `single` selects the trace of one whole-suite run,
+        where import-time execution is credited only to the first test needing it."""
+        key = (rel, single)
+        d = self._lines.get(key)
         if d is None:
-            if rel in self.lined:
-                p = os.path.join(self.dir, "lines", rel.replace("/", "__") + ".json.gz")
+            p = os.path.join(self.dir, "lines1" if single else "lines", rel.replace("/", "__") + ".json.gz")
+            if os.path.exists(p):
                 with gzip.open(p, "rt") as f:
                     d = json.load(f)
+            elif single:
+                d = self._file(rel)
             else:
                 d = {"sets": [], "lines": {}}
-            self._lines[rel] = d
+            self._lines[key] = d
         return d
 
-    def line_tests(self, rel, lo, hi):
-        d = self._file(rel)
+    def line_tests(self, rel, lo, hi, single=False):
+        d = self._file(rel, single)
         out = set()
         seen = set()
         lines = d["lines"]
@@ -513,9 +518,9 @@ class Analyzer:
                     continue
             self._insert(rel, s, after, texts, res)
 
-    def _cov(self, rel, lo, hi, res, focus=None):
+    def _cov(self, rel, lo, hi, res, focus=None, single=False):
         m = self.map
-        got = m.line_tests(rel, lo, hi)
+        got = m.line_tests(rel, lo, hi, single)
         res.cands |= got
         if focus is not None:
             res.focused |= got
@@ -531,6 +536,10 @@ class Analyzer:
                 v = il.get(str(ln))
                 if v:
                     mods.update(v)
+            if single:
+                # a class-level line always runs while its own module is imported;
+                # only another module's import shows that the lambda itself was called
+                mods.discard(rel)
             if mods:
                 res.cold = True
             for mod in mods:
@@ -600,8 +609,11 @@ class Analyzer:
             b0 = len(old[:c0].encode("utf-8"))
             b1 = len(old[:c1].encode("utf-8"))
             if s.lambda_cols(line, b0, b1):
+                # The line also runs when its class body is built at import, which
+                # the per-test traces credit to every importer; the whole-suite
+                # trace keeps that to one test and so isolates the lambda's callers.
                 lo, hi = s.header(node)
-                self._cov(rel, lo, hi, res)
+                self._cov(rel, lo, hi, res, single=True)
                 return
         res.cold = True
         self._import_time(rel, s, node, qual, res, done)

@@ -1,11 +1,15 @@
 """Merge traced coverage into the compact map the selector ships with."""
 import glob, gzip, json, os, sys
 cov, tests_json, times_json, outdir = sys.argv[1:5]
+iso = sys.argv[5] if len(sys.argv) > 5 else None
 tests = json.load(open(tests_json))["tests"]
 ids = [t["id"] for t in tests]
 idx = {t: i for i, t in enumerate(ids)}
 lines, files, classes, implines, classimports = {}, {}, {}, {}, {}
 srcs = [os.path.join(cov, "map.json")] + sorted(glob.glob(os.path.join(cov, "map.json.child.*.json")))
+if iso:
+    srcs += sorted(f for f in glob.glob(os.path.join(iso, "t*.json*")) if f.endswith(".json") and not f.endswith(".meta.json"))
+print("trace files", len(srcs))
 class_ctx = 0
 for p in srcs:
     d = json.load(open(p))
