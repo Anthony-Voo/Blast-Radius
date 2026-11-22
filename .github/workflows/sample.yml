@@ -1,0 +1,29 @@
+name: sample
+on: [push, workflow_dispatch]
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: make build
+      - name: Run on the sample commits under the scorer's limits
+        run: |
+          set -o pipefail
+          for i in 1 2; do
+            start=$(date +%s.%N)
+            docker run --name run$i --platform linux/amd64 --network none --cpus 2 \
+              --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only \
+              --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL \
+              --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp \
+              --volume $PWD/sample/commits:/data/commits:ro \
+              --volume $PWD/sample/tests.json:/data/tests.json:ro \
+              blast-radius-entry > output.jsonl 2> stderr.txt || { echo "::error::run $i exit code $?"; tail -30 stderr.txt; }
+            end=$(date +%s.%N)
+            tail -40 stderr.txt
+            score=$(python3 score.py sample sample/answers.json output.jsonl 2>&1 | tr '\n' ' ')
+            last=$(tail -1 stderr.txt)
+            echo "::notice title=run $i::wall=$(echo "$end - $start" | bc)s | $score | $last"
+            docker rm run$i > /dev/null
+          done
